@@ -103,4 +103,73 @@ async function tryConnectRedis(redis) {
   try {
     await redis.connect();
     // μικρό ping για να είμαστε σίγουροι ότι είναι usable
-    await redis.
+    await redis.ping();
+    return true;
+  } catch (e) {
+    console.log("[Redis connect failed]", e?.message || e);
+    try { await redis.quit(); } catch {}
+    return false;
+  }
+}
+
+/* =================== MAIN ==================== */
+async function main() {
+  // 1) Πάντα παίρνουμε RSS
+  const feed = await fetchFeed();
+  const items = (feed.items || []).slice(0, MAX_ITEMS).map((it) => ({
+    title: it.title,
+    link: it.link
+  }));
+
+  // 2) Προσπαθούμε Redis, αλλά ΔΕΝ αποτυγχάνουμε αν πέσει
+  const redis = createRedisClient();
+  const redisOk = await tryConnectRedis(redis);
+
+  let seen = new Set();
+  if (redisOk) {
+    try {
+      seen = new Set(await redis.smembers(SEEN_KEY));
+    } catch (e) {
+      console.log("[Redis smembers failed]", e?.message || e);
+    }
+  }
+
+  // 3) Mark NEW (μόνο αν έχουμε seen state)
+  const enriched = items.map((it) => {
+    const key = normalize(it.title);
+    return { ...it, key, isNew: redisOk ? !seen.has(key) : false };
+  });
+
+  const newCount = enriched.filter((x) => x.isNew).length;
+
+  // 4) Αποθηκεύουμε seen μόνο αν Redis OK
+  if (redisOk) {
+    try {
+      const pipeline = redis.pipeline();
+      enriched.forEach((x) => pipeline.sadd(SEEN_KEY, x.key));
+      await pipeline.exec();
+    } catch (e) {
+      console.log("[Redis write failed]", e?.message || e);
+    } finally {
+      try { await redis.quit(); } catch {}
+    }
+  }
+
+  // 5) Στέλνουμε ΠΑΝΤΑ Top 10
+  await postToSlack(
+    buildBlocks(enriched, newCount, redisOk),
+    `Google Trends (GR) Top 10 — ${newCount} NEW`
+  );
+}
+
+/* ================== RUN ====================== */
+main().catch(async (err) => {
+  console.error(err);
+  try {
+    await postToSlack(
+      [{ type: "section", text: { type: "mrkdwn", text: `⚠️ *Google Trends Job Failed*\n\`${err.message}\`` } }],
+      "Google Trends Job Failed"
+    );
+  } catch {}
+  process.exit(1);
+});
