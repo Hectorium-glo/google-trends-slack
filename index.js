@@ -16,7 +16,12 @@ const RSS_URLS = [
 if (!SLACK_WEBHOOK_URL) throw new Error("Missing SLACK_WEBHOOK_URL");
 if (!REDIS_URL) throw new Error("Missing REDIS_URL");
 
-const redis = new Redis(REDIS_URL);
+const redis = new Redis(REDIS_URL, {
+  maxRetriesPerRequest: 1,
+  connectTimeout: 5000,
+  enableOfflineQueue: false
+});
+
 const parser = new Parser();
 const SEEN_KEY = `gt:seen:${GEO}`;
 
