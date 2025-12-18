@@ -86,13 +86,16 @@ async function main() {
   });
 
   const newOnes = enriched.filter((x) => x.isNew);
-  if (newOnes.length === 0) return;
+  // Δεν κάνουμε return — στέλνουμε πάντα Top 10
 
   const pipeline = redis.pipeline();
   for (const x of enriched) pipeline.sadd(SEEN_KEY, x.key);
   await pipeline.exec();
 
-  await postToSlack(buildBlocks({ newCount: newOnes.length, items: enriched }), `Google Trends (GR) — ${newOnes.length} new`);
+  await postToSlack(
+  buildBlocks({ newCount: newOnes.length, items: enriched }),
+  `Google Trends (GR) — ${newOnes.length} new`
+);
 }
 
 main()
