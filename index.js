@@ -8,45 +8,27 @@ const REDIS_URL = process.env.REDIS_URL;
 
 const GEO = "GR";
 const MAX_ITEMS = 10;
-
 const RSS_URL = `https://trends.google.com/trending/rss?geo=${GEO}`;
-
 /* ============================================ */
 
-if (!SLACK_WEBHOOK_URL) {
-  throw new Error("Missing SLACK_WEBHOOK_URL");
-}
-if (!REDIS_URL) {
-  throw new Error("Missing REDIS_URL");
-}
-
-/* =============== REDIS ====================== */
-// Cron-friendly Redis config
-const redis = new Redis(REDIS_URL, {
-  maxRetriesPerRequest: 1,
-  connectTimeout: 8000,
-  enableOfflineQueue: false,
-  lazyConnect: true
-});
-
-redis.on("error", (err) => {
-  console.log("[Redis error]", err?.message || err);
-});
-
-/* ============================================ */
+if (!SLACK_WEBHOOK_URL) throw new Error("Missing SLACK_WEBHOOK_URL");
+if (!REDIS_URL) throw new Error("Missing REDIS_URL");
 
 const parser = new Parser();
 const SEEN_KEY = `gt:seen:${GEO}`;
 
-const normalize = (s) =>
-  (s || "").toLowerCase().trim().replace(/\s+/g, " ");
+const normalize = (s) => (s || "").toLowerCase().trim().replace(/\s+/g, " ");
 
-async function postToSlack(blocks) {
-  await fetch(SLACK_WEBHOOK_URL, {
+async function postToSlack(blocks, text = "Google Trends update") {
+  const res = await fetch(SLACK_WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ blocks })
+    body: JSON.stringify({ text, blocks })
   });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`Slack webhook failed: ${res.status} ${t}`);
+  }
 }
 
 /* ============ FETCH GOOGLE TRENDS ============ */
@@ -55,37 +37,36 @@ async function fetchFeed() {
     headers: {
       "User-Agent": "Mozilla/5.0",
       "Accept": "application/rss+xml,application/xml,text/xml,*/*;q=0.9"
-    }
+    },
+    redirect: "follow"
   });
 
+  const xml = await res.text();
   if (!res.ok) {
-    throw new Error(`Google Trends RSS HTTP ${res.status}`);
+    throw new Error(`Google Trends RSS HTTP ${res.status} | ${xml.slice(0, 120)}`);
   }
 
-  const xml = await res.text();
   return parser.parseString(xml);
 }
 
 /* =============== SLACK BLOCKS ================ */
-function buildBlocks(items, newCount) {
+function buildBlocks(items, newCount, redisOk) {
   const now = new Intl.DateTimeFormat("el-GR", {
     dateStyle: "medium",
     timeStyle: "short",
     timeZone: "Europe/Athens"
   }).format(new Date());
 
+  const redisBadge = redisOk ? "✅ Redis OK" : "⚠️ Redis OFF (NEW μπορεί να μην είναι ακριβές)";
+
   const blocks = [
     {
       type: "header",
-      text: {
-        type: "plain_text",
-        text: `🇬🇷 Google Trends (Top 10) — 🆕 ${newCount} new`,
-        emoji: true
-      }
+      text: { type: "plain_text", text: `🇬🇷 Google Trends (Top 10) — 🆕 ${newCount} NEW`, emoji: true }
     },
     {
       type: "context",
-      elements: [{ type: "mrkdwn", text: `⏱️ ${now}` }]
+      elements: [{ type: "mrkdwn", text: `⏱️ ${now}  |  ${redisBadge}` }]
     },
     { type: "divider" }
   ];
@@ -104,56 +85,22 @@ function buildBlocks(items, newCount) {
   return blocks;
 }
 
-/* =================== MAIN ==================== */
-async function main() {
-  // 1. Connect to Redis
-  await redis.connect();
-
-  // 2. Fetch Google Trends
-  const feed = await fetchFeed();
-  const items = (feed.items || []).slice(0, MAX_ITEMS);
-
-  // 3. Load seen items
-  const seen = new Set(await redis.smembers(SEEN_KEY));
-
-  // 4. Mark NEW
-  const enriched = items.map((it) => {
-    const key = normalize(it.title);
-    return {
-      title: it.title,
-      link: it.link,
-      key,
-      isNew: !seen.has(key)
-    };
+/* =============== REDIS SAFE CONNECT =============== */
+function createRedisClient() {
+  const r = new Redis(REDIS_URL, {
+    // cron-friendly: μην “κολλάει” σε retries/queue
+    maxRetriesPerRequest: 1,
+    connectTimeout: 8000,
+    enableOfflineQueue: false,
+    lazyConnect: true
   });
 
-  const newCount = enriched.filter((x) => x.isNew).length;
-
-  // 5. Save all current Top 10 as seen
-  const pipeline = redis.pipeline();
-  enriched.forEach((x) => pipeline.sadd(SEEN_KEY, x.key));
-  await pipeline.exec();
-
-  // 6. Send ALWAYS Top 10 to Slack
-  await postToSlack(buildBlocks(enriched, newCount));
-
-  // 7. Close Redis
-  await redis.quit();
+  r.on("error", (err) => console.log("[Redis error]", err?.message || err));
+  return r;
 }
 
-/* ================== RUN ====================== */
-main().catch(async (err) => {
-  console.error(err);
+async function tryConnectRedis(redis) {
   try {
-    await postToSlack([
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `⚠️ *Google Trends Job Failed*\n\`${err.message}\``
-        }
-      }
-    ]);
-  } catch {}
-  process.exit(1);
-});
+    await redis.connect();
+    // μικρό ping για να είμαστε σίγουροι ότι είναι usable
+    await redis.
