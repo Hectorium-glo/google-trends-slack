@@ -1,0 +1,12 @@
+{
+  "name": "google-trends-slack-cron",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "rss-parser": "^3.13.0",
+    "ioredis": "^5.5.0",
+    "node-fetch": "^3.3.2"
+  }
+}
