@@ -6,18 +6,21 @@ if (!SLACK_WEBHOOK_URL) throw new Error("Missing SLACK_WEBHOOK_URL");
 
 const GEO = process.env.GEO || "GR";
 const HL = process.env.HL || "el";
-
-// Πόσα active να δείχνει (δεν είναι “Top 10”, είναι απλά ένα όριο για να μην ξεχειλώνει το Slack)
 const MAX_ITEMS = Number(process.env.MAX_ITEMS || 20);
 
-// Athens tz offset used by Trends API (in minutes, like JS getTimezoneOffset)
+// Athens offset in minutes (same style as Google Trends params)
 const TZ = -120;
 
-// Endpoint που χρησιμοποιεί το Trending now (active/realtime)
-const REALTIME_TRENDS_URL =
-  `https://trends.google.com/trends/api/realtimetrends?` +
-  `hl=${encodeURIComponent(HL)}&tz=${TZ}&cat=all&fi=0&fs=0&geo=${encodeURIComponent(GEO)}` +
-  `&ri=300&rs=${MAX_ITEMS}&sort=0`;
+// Try multiple variants (some return 404 depending on params / edge handling)
+const REALTIME_URLS = [
+  // safest: cat=0 (no category filter)
+  `https://trends.google.com/trends/api/realtimetrends?hl=${encodeURIComponent(HL)}&tz=${TZ}&geo=${encodeURIComponent(GEO)}&cat=0&fi=0&fs=0&ri=300&rs=${MAX_ITEMS}&sort=0`,
+  // sometimes works without fi/fs
+  `https://trends.google.com/trends/api/realtimetrends?hl=${encodeURIComponent(HL)}&tz=${TZ}&geo=${encodeURIComponent(GEO)}&cat=0&ri=300&rs=${MAX_ITEMS}&sort=0`
+];
+
+const REFERER = `https://trends.google.com/trending?geo=${encodeURIComponent(GEO)}`;
+const UA = "Mozilla/5.0";
 /* ============================================ */
 
 async function postToSlack(blocks, text = "Google Trends") {
@@ -48,23 +51,39 @@ function exploreLink(q, geo) {
 }
 
 async function fetchRealtimeTrends() {
-  const res = await fetch(REALTIME_TRENDS_URL, {
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      "Accept": "application/json,text/plain,*/*"
-    },
-    redirect: "follow"
-  });
+  let last = "";
 
-  const text = await res.text();
-  if (!res.ok) throw new Error(`RealtimeTrends HTTP ${res.status} | ${text.slice(0, 140)}`);
+  for (const url of REALTIME_URLS) {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": UA,
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "el-GR,el;q=0.9,en;q=0.8",
+        "Referer": REFERER
+      },
+      redirect: "follow"
+    });
 
-  // Response starts with )]}'
-  const cleaned = text.replace(/^\)\]\}'\s*\n?/, "");
-  return JSON.parse(cleaned);
+    const text = await res.text();
+
+    if (!res.ok) {
+      last = `HTTP ${res.status} | ${text.slice(0, 140)}`;
+      continue;
+    }
+
+    // Response starts with )]}'
+    const cleaned = text.replace(/^\)\]\}'\s*\n?/, "");
+    try {
+      return JSON.parse(cleaned);
+    } catch (e) {
+      last = `JSON parse failed | ${cleaned.slice(0, 140)}`;
+    }
+  }
+
+  throw new Error(`RealtimeTrends failed. ${last}`);
 }
 
-function extractActiveRows(json, maxItems, geo) {
+function extractRows(json, maxItems, geo) {
   const stories = json?.storySummaries?.trendingStories || [];
 
   return stories.slice(0, maxItems).map((s) => {
@@ -80,12 +99,11 @@ function extractActiveRows(json, maxItems, geo) {
       "—";
 
     const started =
-      s?.startTime ||
       s?.startTimeMillis ||
+      s?.startTime ||
       s?.time ||
       null;
 
-    // breakdown (3 links max)
     const breakdownRaw =
       (s?.relatedQueries || [])
         .flatMap((rq) => rq?.queries || [])
@@ -117,32 +135,23 @@ function buildBlocks(rows, geo) {
   const headerLine = `*Trend* | *Search volume* | *Started* | *Trend breakdown*`;
   const separator = "—".repeat(80);
 
-  const lines = rows.map((r) => {
-    return `*${r.title}* | ${r.volume} | ${formatStarted(r.started)} | ${r.breakdownLinks}`;
-  });
+  const lines = rows.map((r) =>
+    `*${r.title}* | ${r.volume} | ${formatStarted(r.started)} | ${r.breakdownLinks}`
+  );
 
   const textBlock = [headerLine, separator, ...lines].join("\n");
 
   return [
-    {
-      type: "header",
-      text: { type: "plain_text", text: `🇬🇷 Google Trends — Active τώρα (${geo})`, emoji: true }
-    },
-    {
-      type: "context",
-      elements: [{ type: "mrkdwn", text: `⏱️ ${now} (κάθε 5’)` }]
-    },
+    { type: "header", text: { type: "plain_text", text: `🇬🇷 Google Trends — Active τώρα (${geo})`, emoji: true } },
+    { type: "context", elements: [{ type: "mrkdwn", text: `⏱️ ${now} (κάθε 5’)` }] },
     { type: "divider" },
-    {
-      type: "section",
-      text: { type: "mrkdwn", text: textBlock }
-    }
+    { type: "section", text: { type: "mrkdwn", text: textBlock } }
   ];
 }
 
 async function main() {
   const json = await fetchRealtimeTrends();
-  const rows = extractActiveRows(json, MAX_ITEMS, GEO);
+  const rows = extractRows(json, MAX_ITEMS, GEO);
   await postToSlack(buildBlocks(rows, GEO), `Google Trends Active (${GEO})`);
 }
 
