@@ -10,8 +10,7 @@ const HL = process.env.HL || "el";
 const MAX_ITEMS = Number(process.env.MAX_ITEMS || 20);
 
 const RSS_URLS = [
-  `https://trends.google.com/trends/trendingsearches/realtime/rss?geo=${GEO}&hl=${HL}`,
-  `https://trends.google.com/trends/trendingsearches/daily/rss?geo=${GEO}&hl=${HL}`
+  `https://trends.google.com/trending/rss?geo=${GEO}&hl=${HL}`
 ];
 
 if (!SLACK_WEBHOOK_URL) throw new Error("Missing SLACK_WEBHOOK_URL");
