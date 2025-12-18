@@ -1,25 +1,26 @@
-import Parser from "rss-parser";
 import fetch from "node-fetch";
-import Redis from "ioredis";
 
 /* ================== CONFIG ================== */
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
-const REDIS_URL = process.env.REDIS_URL;
+if (!SLACK_WEBHOOK_URL) throw new Error("Missing SLACK_WEBHOOK_URL");
 
-const GEO = "GR";
-const MAX_ITEMS = 10;
-const RSS_URL = `https://trends.google.com/trending/rss?geo=${GEO}`;
+const GEO = process.env.GEO || "GR";
+const HL = process.env.HL || "el";
+
+// Πόσα active να δείχνει (δεν είναι “Top 10”, είναι απλά ένα όριο για να μην ξεχειλώνει το Slack)
+const MAX_ITEMS = Number(process.env.MAX_ITEMS || 20);
+
+// Athens tz offset used by Trends API (in minutes, like JS getTimezoneOffset)
+const TZ = -120;
+
+// Endpoint που χρησιμοποιεί το Trending now (active/realtime)
+const REALTIME_TRENDS_URL =
+  `https://trends.google.com/trends/api/realtimetrends?` +
+  `hl=${encodeURIComponent(HL)}&tz=${TZ}&cat=all&fi=0&fs=0&geo=${encodeURIComponent(GEO)}` +
+  `&ri=300&rs=${MAX_ITEMS}&sort=0`;
 /* ============================================ */
 
-if (!SLACK_WEBHOOK_URL) throw new Error("Missing SLACK_WEBHOOK_URL");
-if (!REDIS_URL) throw new Error("Missing REDIS_URL");
-
-const parser = new Parser();
-const SEEN_KEY = `gt:seen:${GEO}`;
-
-const normalize = (s) => (s || "").toLowerCase().trim().replace(/\s+/g, " ");
-
-async function postToSlack(blocks, text = "Google Trends update") {
+async function postToSlack(blocks, text = "Google Trends") {
   const res = await fetch(SLACK_WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -31,138 +32,120 @@ async function postToSlack(blocks, text = "Google Trends update") {
   }
 }
 
-/* ============ FETCH GOOGLE TRENDS ============ */
-async function fetchFeed() {
-  const res = await fetch(RSS_URL, {
+function formatStarted(tsSecondsOrMs) {
+  if (!tsSecondsOrMs) return "—";
+  const ms = tsSecondsOrMs > 10_000_000_000 ? tsSecondsOrMs : tsSecondsOrMs * 1000;
+  return new Intl.DateTimeFormat("el-GR", {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: "Europe/Athens"
+  }).format(new Date(ms));
+}
+
+function exploreLink(q, geo) {
+  const url = `https://trends.google.com/trends/explore?geo=${geo}&q=${encodeURIComponent(q)}`;
+  return `<${url}|${q}>`;
+}
+
+async function fetchRealtimeTrends() {
+  const res = await fetch(REALTIME_TRENDS_URL, {
     headers: {
       "User-Agent": "Mozilla/5.0",
-      "Accept": "application/rss+xml,application/xml,text/xml,*/*;q=0.9"
+      "Accept": "application/json,text/plain,*/*"
     },
     redirect: "follow"
   });
 
-  const xml = await res.text();
-  if (!res.ok) {
-    throw new Error(`Google Trends RSS HTTP ${res.status} | ${xml.slice(0, 120)}`);
-  }
+  const text = await res.text();
+  if (!res.ok) throw new Error(`RealtimeTrends HTTP ${res.status} | ${text.slice(0, 140)}`);
 
-  return parser.parseString(xml);
+  // Response starts with )]}'
+  const cleaned = text.replace(/^\)\]\}'\s*\n?/, "");
+  return JSON.parse(cleaned);
 }
 
-/* =============== SLACK BLOCKS ================ */
-function buildBlocks(items, newCount, redisOk) {
+function extractActiveRows(json, maxItems, geo) {
+  const stories = json?.storySummaries?.trendingStories || [];
+
+  return stories.slice(0, maxItems).map((s) => {
+    const title =
+      s?.title?.query ||
+      s?.title ||
+      s?.entityNames?.[0] ||
+      "—";
+
+    const volume =
+      s?.formattedTraffic ||
+      s?.traffic ||
+      "—";
+
+    const started =
+      s?.startTime ||
+      s?.startTimeMillis ||
+      s?.time ||
+      null;
+
+    // breakdown (3 links max)
+    const breakdownRaw =
+      (s?.relatedQueries || [])
+        .flatMap((rq) => rq?.queries || [])
+        .map((q) => q?.query || q)
+        .filter(Boolean)
+        .slice(0, 3);
+
+    const breakdownLinks = (breakdownRaw.length ? breakdownRaw : [title])
+      .slice(0, 3)
+      .map((q) => exploreLink(String(q), geo))
+      .join(", ");
+
+    return {
+      title: String(title),
+      volume: String(volume),
+      started,
+      breakdownLinks
+    };
+  });
+}
+
+function buildBlocks(rows, geo) {
   const now = new Intl.DateTimeFormat("el-GR", {
     dateStyle: "medium",
     timeStyle: "short",
     timeZone: "Europe/Athens"
   }).format(new Date());
 
-  const redisBadge = redisOk ? "✅ Redis OK" : "⚠️ Redis OFF (NEW μπορεί να μην είναι ακριβές)";
+  const headerLine = `*Trend* | *Search volume* | *Started* | *Trend breakdown*`;
+  const separator = "—".repeat(80);
 
-  const blocks = [
+  const lines = rows.map((r) => {
+    return `*${r.title}* | ${r.volume} | ${formatStarted(r.started)} | ${r.breakdownLinks}`;
+  });
+
+  const textBlock = [headerLine, separator, ...lines].join("\n");
+
+  return [
     {
       type: "header",
-      text: { type: "plain_text", text: `🇬🇷 Google Trends (Top 10) — 🆕 ${newCount} NEW`, emoji: true }
+      text: { type: "plain_text", text: `🇬🇷 Google Trends — Active τώρα (${geo})`, emoji: true }
     },
     {
       type: "context",
-      elements: [{ type: "mrkdwn", text: `⏱️ ${now}  |  ${redisBadge}` }]
+      elements: [{ type: "mrkdwn", text: `⏱️ ${now} (κάθε 5’)` }]
     },
-    { type: "divider" }
-  ];
-
-  items.forEach((it, idx) => {
-    const badge = it.isNew ? "🆕 *NEW*" : "•";
-    blocks.push({
+    { type: "divider" },
+    {
       type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `${badge} *${idx + 1}. ${it.title}*\n<${it.link}|Άνοιγμα στο Google Trends>`
-      }
-    });
-  });
-
-  return blocks;
+      text: { type: "mrkdwn", text: textBlock }
+    }
+  ];
 }
 
-/* =============== REDIS SAFE CONNECT =============== */
-function createRedisClient() {
-  const r = new Redis(REDIS_URL, {
-    // cron-friendly: μην “κολλάει” σε retries/queue
-    maxRetriesPerRequest: 1,
-    connectTimeout: 8000,
-    enableOfflineQueue: false,
-    lazyConnect: true
-  });
-
-  r.on("error", (err) => console.log("[Redis error]", err?.message || err));
-  return r;
-}
-
-async function tryConnectRedis(redis) {
-  try {
-    await redis.connect();
-    // μικρό ping για να είμαστε σίγουροι ότι είναι usable
-    await redis.ping();
-    return true;
-  } catch (e) {
-    console.log("[Redis connect failed]", e?.message || e);
-    try { await redis.quit(); } catch {}
-    return false;
-  }
-}
-
-/* =================== MAIN ==================== */
 async function main() {
-  // 1) Πάντα παίρνουμε RSS
-  const feed = await fetchFeed();
-  const items = (feed.items || []).slice(0, MAX_ITEMS).map((it) => ({
-    title: it.title,
-    link: it.link
-  }));
-
-  // 2) Προσπαθούμε Redis, αλλά ΔΕΝ αποτυγχάνουμε αν πέσει
-  const redis = createRedisClient();
-  const redisOk = await tryConnectRedis(redis);
-
-  let seen = new Set();
-  if (redisOk) {
-    try {
-      seen = new Set(await redis.smembers(SEEN_KEY));
-    } catch (e) {
-      console.log("[Redis smembers failed]", e?.message || e);
-    }
-  }
-
-  // 3) Mark NEW (μόνο αν έχουμε seen state)
-  const enriched = items.map((it) => {
-    const key = normalize(it.title);
-    return { ...it, key, isNew: redisOk ? !seen.has(key) : false };
-  });
-
-  const newCount = enriched.filter((x) => x.isNew).length;
-
-  // 4) Αποθηκεύουμε seen μόνο αν Redis OK
-  if (redisOk) {
-    try {
-      const pipeline = redis.pipeline();
-      enriched.forEach((x) => pipeline.sadd(SEEN_KEY, x.key));
-      await pipeline.exec();
-    } catch (e) {
-      console.log("[Redis write failed]", e?.message || e);
-    } finally {
-      try { await redis.quit(); } catch {}
-    }
-  }
-
-  // 5) Στέλνουμε ΠΑΝΤΑ Top 10
-  await postToSlack(
-    buildBlocks(enriched, newCount, redisOk),
-    `Google Trends (GR) Top 10 — ${newCount} NEW`
-  );
+  const json = await fetchRealtimeTrends();
+  const rows = extractActiveRows(json, MAX_ITEMS, GEO);
+  await postToSlack(buildBlocks(rows, GEO), `Google Trends Active (${GEO})`);
 }
 
-/* ================== RUN ====================== */
 main().catch(async (err) => {
   console.error(err);
   try {
