@@ -18,8 +18,13 @@ if (!REDIS_URL) throw new Error("Missing REDIS_URL");
 
 const redis = new Redis(REDIS_URL, {
   maxRetriesPerRequest: 1,
-  connectTimeout: 5000,
-  enableOfflineQueue: false
+  connectTimeout: 8000,
+  enableOfflineQueue: false,
+  lazyConnect: true
+});
+
+redis.on("error", (err) => {
+  console.log("[redis error]", err?.message || err);
 });
 
 const parser = new Parser();
