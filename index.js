@@ -26,7 +26,7 @@ const normalize = (s) => (s || "").toLowerCase().trim().replace(/\s+/g, " ");
 
 function exploreLink(q) {
   const url = `https://trends.google.com/trends/explore?geo=${GEO}&q=${encodeURIComponent(q)}`;
-  return `<${url}|περισσότερα εδώ>`;
+  return `<${url}|εδώ>`;
 }
 
 function startedTimestampFromMinutes(mins) {
@@ -148,6 +148,11 @@ function indexEnrichmentByTitle(serpJson) {
 }
 
 /* ================== Slack newsroom "table" (fields grid) ================== */
+function pad(str, len) {
+  const s = String(str ?? "");
+  return s.length >= len ? s.slice(0, len - 1) + "…" : s + " ".repeat(len - s.length);
+}
+
 function buildBlocks(rows) {
   const now = new Intl.DateTimeFormat("el-GR", {
     day: "2-digit",
@@ -159,41 +164,65 @@ function buildBlocks(rows) {
     timeZone: "Europe/Athens"
   }).format(new Date());
 
-  const blocks = [
-    {
-      type: "header",
-      text: { type: "plain_text", text: `🇬🇷 Trending Now (GR) — Top 10`, emoji: true }
-    },
-    {
-      type: "context",
-      elements: [{ type: "mrkdwn", text: `⏱️ ${now} • Αυτόματο update κάθε 30’` }]
-    },
-    { type: "divider" },
-    {
-      type: "section",
-      fields: [
-        { type: "mrkdwn", text: "*Trend*" },
-        { type: "mrkdwn", text: "*Volume*" },
-        { type: "mrkdwn", text: "*Started*" },
-        { type: "mrkdwn", text: "*Breakdown*" }
-      ]
-    },
-    { type: "divider" }
-  ];
+  // Column widths (ρυθμίζονται αν θες)
+  const W_POS = 2;
+  const W_TREND = 18;
+  const W_TIME = 14;
+  const W_VOL = 6;
 
-  rows.forEach((r, idx) => {
-    blocks.push({
-      type: "section",
-      fields: [
-        { type: "mrkdwn", text: `*${idx + 1}. ${r.title}*` },
-        { type: "mrkdwn", text: r.volume || "—" },
-        { type: "mrkdwn", text: r.startedText || "—" },
-        { type: "mrkdwn", text: r.breakdownLinks || "—" }
-      ]
-    });
+  const header =
+    pad("#", W_POS) + " | " +
+    pad("Trend", W_TREND) + " | " +
+    pad("Time", W_TIME) + " | " +
+    pad("Volume", W_VOL) + " | Info";
+
+  const sep = "-".repeat(header.length);
+
+  const lines = rows.map((r, i) => {
+    return (
+      pad(i + 1, W_POS) + " | " +
+      pad(r.title, W_TREND) + " | " +
+      pad(r.startedText || "—", W_TIME) + " | " +
+      pad(r.volume || "—", W_VOL) + " | εδώ"
+    );
   });
 
-  return blocks;
+  return [
+  {
+    type: "header",
+    text: {
+      type: "plain_text",
+      text: "🇬🇷 Trending Now (GR) — Top 10",
+      emoji: true
+    }
+  },
+  {
+    type: "context",
+    elements: [
+      {
+        type: "mrkdwn",
+        text: `⏱️ ${now} • Αυτόματο update κάθε 30’`
+      }
+    ]
+  },
+  { type: "divider" },
+  {
+    type: "section",
+    text: {
+      type: "mrkdwn",
+      text: "```" + [header, sep, ...lines].join("\n") + "```"
+    }
+  },
+  {
+    type: "context",
+    elements: rows.map((r, i) => ({
+      type: "mrkdwn",
+      text: `*${i + 1}.* <https://trends.google.com/trends/explore?geo=GR&q=${encodeURIComponent(
+        r.title
+      )}|περισσότερα εδώ>`
+    }))
+  }
+];
 }
 
 /* ================== MAIN ================== */
