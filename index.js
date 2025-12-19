@@ -12,6 +12,25 @@ const MAX_ITEMS = Number(process.env.MAX_ITEMS || 10);
 const RSS_URL = `https://trends.google.com/trending/rss?geo=${encodeURIComponent(GEO)}`;
 const parser = new Parser();
 
+// Format raw search volume to K+/M+/B+
+function formatVolume(v) {
+  if (v == null) return "—";
+
+  // Αν έρθει ήδη formatted (π.χ. "200K+"), κράτα το
+  if (typeof v === "string" && /[KMB]\+?$/.test(v.trim())) {
+    return v.trim();
+  }
+
+  // Καθάρισε strings τύπου "12,345"
+  const n = Number(String(v).replace(/,/g, ""));
+  if (!Number.isFinite(n)) return String(v);
+
+  if (n >= 1_000_000_000) return `${Math.round(n / 1_000_000_000)}B+`;
+  if (n >= 1_000_000)     return `${Math.round(n / 1_000_000)}M+`;
+  if (n >= 1_000)         return `${Math.round(n / 1_000)}K+`;
+  return `${n}`;
+}
+
 /* ================== ENRICHMENT SOURCE ==================
    We KEEP RSS as baseline, but enrich via SerpApi Trending Now.
    SerpApi engine: google_trends_trending_now :contentReference[oaicite:1]{index=1}
@@ -54,17 +73,25 @@ async function postToSlack(blocks, text = "Google Trends") {
   }
 }
 
-function relTimeFromMinutes(mins) {
+function startedTimestampFromMinutes(mins) {
   if (mins == null || Number.isNaN(Number(mins))) return "—";
-  const m = Number(mins);
-  if (m < 60) return `Started ${m} min ago`;
-  const h = Math.round((m / 60) * 10) / 10; // 1 decimal
-  return `Started ${h} hours ago`;
+  const msAgo = Number(mins) * 60 * 1000;
+  const started = new Date(Date.now() - msAgo);
+
+  return new Intl.DateTimeFormat("el-GR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Europe/Athens"
+  }).format(started);
 }
 
 function exploreLink(q) {
   const url = `https://trends.google.com/trends/explore?geo=${GEO}&q=${encodeURIComponent(q)}`;
-  return `<${url}|${q}>`;
+  return `<${url}|περισσότερα εδώ>`;
 }
 
 /* ================== 1) Baseline: RSS ================== */
@@ -111,7 +138,12 @@ function indexEnrichmentByTitle(serpJson) {
     const title = String(it?.query || it?.title || it?.trend || "");
     if (!title) continue;
 
-    const volume = it?.search_volume || it?.traffic || it?.formattedTraffic || it?.searches || "—";
+    const volumeRaw =
+  it?.traffic ||
+  it?.search_volume ||
+  it?.formattedTraffic ||
+  it?.searches ||
+  null;
 
     // prefer “time_active_minutes” if present, else try derive from start/end
     const timeActiveMin = it?.time_active_minutes ?? null;
@@ -123,8 +155,8 @@ function indexEnrichmentByTitle(serpJson) {
         .slice(0, 3);
 
     map.set(normalize(title), {
-      volume: String(volume),
-      startedText: relTimeFromMinutes(timeActiveMin),
+      volume: formatVolume(volumeRaw),
+      startedText: startedTimestampFromMinutes(timeActiveMin),
       breakdownLinks: (breakdown.length ? breakdown : [title]).slice(0, 3).map(exploreLink).join(", ")
     });
   }
@@ -134,29 +166,56 @@ function indexEnrichmentByTitle(serpJson) {
 /* ================== Newsroom Slack layout ================== */
 function buildNewsroomBlocks(rows, newCount) {
   const now = new Intl.DateTimeFormat("el-GR", {
-    dateStyle: "medium",
-    timeStyle: "short",
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
     timeZone: "Europe/Athens"
   }).format(new Date());
 
-  // “Table-like” mono-space feel with pipes
-  const header = `*Trending Now (GR)* — 🆕 ${newCount} NEW`;
-  const columns = `*Trend* | *Volume* | *Started* | *Breakdown*`;
-  const separator = "—".repeat(88);
+  const blocks = [
+    {
+      type: "header",
+      text: { type: "plain_text", text: `🇬🇷 Trending Now (GR) — ${newCount} NEW`, emoji: true }
+    },
+    {
+      type: "context",
+      elements: [{ type: "mrkdwn", text: `⏱️ ${now} • Στέλνει μόνο όταν μπαίνει νέο στο Top10` }]
+    },
+    { type: "divider" }
+  ];
 
-  const lines = rows.map((r, idx) => {
-    const badge = r.isNew ? "🆕" : "  ";
-    // Badge δίπλα στο trend (όπως ζήτησες)
-    const trend = `${badge} *${idx + 1}. ${r.title}*`;
-    return `${trend} | ${r.volume} | ${r.startedText} | ${r.breakdownLinks}`;
+  // Προαιρετική “γραμμή κεφαλίδων”
+  blocks.push({
+    type: "section",
+    fields: [
+      { type: "mrkdwn", text: "*Trend*" },
+      { type: "mrkdwn", text: "*Volume*" },
+      { type: "mrkdwn", text: "*Started*" },
+      { type: "mrkdwn", text: "*Breakdown*" }
+    ]
+  });
+  blocks.push({ type: "divider" });
+
+  // 1 row = 1 section με 4 fields (grid)
+  rows.forEach((r, idx) => {
+    const badge = r.isNew ? "🆕" : "";
+    const trendCell = `${badge} *${idx + 1}. ${r.title}*`.trim();
+
+    blocks.push({
+      type: "section",
+      fields: [
+        { type: "mrkdwn", text: trendCell || "—" },
+        { type: "mrkdwn", text: r.volume || "—" },
+        { type: "mrkdwn", text: r.startedText || "—" },
+        { type: "mrkdwn", text: r.breakdownLinks || "—" }
+      ]
+    });
   });
 
-  return [
-    { type: "header", text: { type: "plain_text", text: `🇬🇷 Trending Now — ${newCount} NEW`, emoji: true } },
-    { type: "context", elements: [{ type: "mrkdwn", text: `⏱️ ${now} • Post μόνο αν υπάρχει νέο στο Top10` }] },
-    { type: "divider" },
-    { type: "section", text: { type: "mrkdwn", text: [header, columns, separator, ...lines].join("\n") } }
-  ];
+  return blocks;
 }
 
 /* ================== MAIN ================== */
