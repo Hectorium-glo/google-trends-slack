@@ -203,8 +203,8 @@ function buildBlocks(rows) {
 
   // Table widths (W_POS=3 so "10" fits)
   const W_POS = 3;
-  const W_TREND = 24;
-  const W_TIME = 14; // "DD/MM/YY HH:MM" fits
+  const W_TREND = 30;
+  const W_TIME = 18; // "DD/MM/YY HH:MM" fits
   const W_VOL = 7;
 
   const header =
