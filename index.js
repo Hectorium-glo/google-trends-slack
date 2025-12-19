@@ -191,7 +191,7 @@ function indexVolumeByTitle(serpJson) {
 
 /* ================== Slack blocks (table + Sample URL list) ================== */
 function buildBlocks(rows) {
-  const now = new Intl.DateTimeFormat("el-GR", {
+  const nowFull = new Intl.DateTimeFormat("el-GR", {
     day: "2-digit",
     month: "2-digit",
     year: "2-digit",
@@ -201,14 +201,16 @@ function buildBlocks(rows) {
     timeZone: "Europe/Athens"
   }).format(new Date());
 
-  // W_POS=3 so "10" fits nicely
+  // Table widths (W_POS=3 so "10" fits)
   const W_POS = 3;
   const W_TREND = 24;
+  const W_TIME = 14; // "DD/MM/YY HH:MM" fits
   const W_VOL = 7;
 
   const header =
     pad("#", W_POS) + " | " +
     pad("Trend", W_TREND) + " | " +
+    pad("Time", W_TIME) + " | " +
     pad("Volume", W_VOL);
 
   const sep = "-".repeat(header.length);
@@ -216,12 +218,15 @@ function buildBlocks(rows) {
   const lines = rows.map((r, i) => (
     pad(i + 1, W_POS) + " | " +
     pad(r.title, W_TREND) + " | " +
+    pad(nowFull, W_TIME) + " | " +
     pad(r.volume || "—", W_VOL)
   ));
 
   const sampleLines = rows.map((r, i) =>
-    r.sampleUrl ? `*${i + 1}.* <${r.sampleUrl}|Sample URL>` : `*${i + 1}.* No URL`
-  );
+  r.sampleUrl
+    ? `*${i + 1}.* <${r.sampleUrl}|${r.title}>`
+    : `*${i + 1}.* ${r.title}`
+);
 
   return [
     {
@@ -230,7 +235,7 @@ function buildBlocks(rows) {
     },
     {
       type: "context",
-      elements: [{ type: "mrkdwn", text: `⏱️ ${now} • update κάθε 30’` }]
+      elements: [{ type: "mrkdwn", text: `⏱️ ${nowFull} • update κάθε 30’` }]
     },
     { type: "divider" },
     {
