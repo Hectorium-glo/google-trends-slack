@@ -170,7 +170,7 @@ function buildBlocks(rows) {
 
   // Column widths (ρυθμίζονται αν θες)
   const W_POS = 3;
-  const W_TREND = 10;
+  const W_TREND = 30;
   const W_VOL = 8;
 
   const header =
