@@ -214,14 +214,6 @@ const lines = rows.map((r, i) => {
       text: "```" + [header, sep, ...lines].join("\n") + "```"
     }
   },
-  {
-    type: "context",
-    elements: rows.map((r, i) => ({
-      type: "mrkdwn",
-      text: `*${i + 1}.* <https://trends.google.com/trends/explore?geo=GR&q=${encodeURIComponent(
-        r.title
-      )}|περισσότερα εδώ>`
-    }))
   }
 ];
 }
