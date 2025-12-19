@@ -48,12 +48,16 @@ function startedTimestampFromMinutes(mins) {
 function formatVolume(v) {
   if (v == null) return "—";
 
-  // Already formatted like "200K+"
+  // Αν έρθει ήδη formatted (π.χ. "200K+"), κράτα το
   if (typeof v === "string" && /[KMB]\+?$/.test(v.trim())) return v.trim();
 
-  // Handle "12,345"
+  // Handle strings τύπου "12,345"
   const n = Number(String(v).replace(/,/g, ""));
   if (!Number.isFinite(n)) return String(v);
+
+  // ✅ Heuristic: αν είναι μικρό νούμερο (1..999) στο trending,
+  // το αντιμετωπίζουμε ως "χιλιάδες"
+  if (n >= 1 && n < 1000) return `${Math.round(n)}K+`;
 
   if (n >= 1_000_000_000) return `${Math.round(n / 1_000_000_000)}B+`;
   if (n >= 1_000_000)     return `${Math.round(n / 1_000_000)}M+`;
@@ -165,27 +169,24 @@ function buildBlocks(rows) {
   }).format(new Date());
 
   // Column widths (ρυθμίζονται αν θες)
-  const W_POS = 2;
-  const W_TREND = 18;
-  const W_TIME = 14;
-  const W_VOL = 6;
+  const W_POS = 3;
+  const W_TREND = 10;
+  const W_VOL = 8;
 
   const header =
-    pad("#", W_POS) + " | " +
-    pad("Trend", W_TREND) + " | " +
-    pad("Time", W_TIME) + " | " +
-    pad("Volume", W_VOL) + " | Info";
+  pad("#", W_POS) + " | " +
+  pad("Trend", W_TREND) + " | " +
+  pad("Volume", W_VOL);
 
-  const sep = "-".repeat(header.length);
+const sep = "-".repeat(header.length);
 
-  const lines = rows.map((r, i) => {
-    return (
-      pad(i + 1, W_POS) + " | " +
-      pad(r.title, W_TREND) + " | " +
-      pad(r.startedText || "—", W_TIME) + " | " +
-      pad(r.volume || "—", W_VOL) + " | εδώ"
-    );
-  });
+const lines = rows.map((r, i) => {
+  return (
+    pad(i + 1, W_POS) + " | " +
+    pad(r.title, W_TREND) + " | " +
+    pad(r.volume || "—", W_VOL)
+  );
+});
 
   return [
   {
