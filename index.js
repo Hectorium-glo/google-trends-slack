@@ -74,6 +74,25 @@ function volumeToNumber(vFormattedOrRaw) {
   return n;
 }
 
+function timeAgoFromPubDate(pubDate) {
+  if (!pubDate) return "—";
+  const d = new Date(pubDate);
+  if (Number.isNaN(d.getTime())) return "—";
+
+  const diffMs = Date.now() - d.getTime();
+  if (diffMs < 0) return "—";
+
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "μόλις τώρα";
+  if (mins < 60) return `${mins} λεπτά πριν`;
+
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} ώρ${hours === 1 ? "α" : "ες"} πριν`;
+
+  const days = Math.floor(hours / 24);
+  return `${days} ημέρ${days === 1 ? "α" : "ες"} πριν`;
+}
+
 /* ================== Slack ================== */
 async function postToSlack(blocks, text = "Google Trends") {
   const res = await fetch(SLACK_WEBHOOK_URL, {
@@ -141,7 +160,11 @@ async function fetchTrendingRssTopN() {
     const title = String(it.title || "—");
     const sampleUrl = newsUrlMap.get(normalize(title)) || null;
 
-    return { title, sampleUrl };
+    return {
+  title,
+  sampleUrl,
+  pubDate: it.pubDate || it.isoDate || null
+};
   });
 }
 
@@ -204,23 +227,23 @@ function buildBlocks(rows) {
   // Table widths (W_POS=3 so "10" fits)
   const W_POS = 3;
   const W_TREND = 30;
-  const W_TIME = 18; // "DD/MM/YY HH:MM" fits
+  const W_TIME = 18;
   const W_VOL = 7;
 
   const header =
-    pad("#", W_POS) + " | " +
-    pad("Trend", W_TREND) + " | " +
-    pad("Time", W_TIME) + " | " +
-    pad("Volume", W_VOL);
+  pad("#", W_POS) + " | " +
+  pad("Trend", W_TREND) + " | " +
+  pad("Time", W_TIME) + " | " +
+  pad("Volume", W_VOL);
 
   const sep = "-".repeat(header.length);
 
   const lines = rows.map((r, i) => (
-    pad(i + 1, W_POS) + " | " +
-    pad(r.title, W_TREND) + " | " +
-    pad(nowFull, W_TIME) + " | " +
-    pad(r.volume || "—", W_VOL)
-  ));
+  pad(i + 1, W_POS) + " | " +
+  pad(r.title, W_TREND) + " | " +
+  pad(r.timeAgo || "—", W_TIME) + " | " +
+  pad(r.volume || "—", W_VOL)
+));
 
   const sampleLines = rows.map((r, i) =>
   r.sampleUrl
@@ -263,6 +286,8 @@ async function main() {
     return {
       title: r.title,
       sampleUrl: r.sampleUrl,
+      pubDate: r.pubDate,
+      timeAgo: timeAgoFromPubDate(r.pubDate),
       volume: v.volume || "—",
       volumeNum: v.volumeNum || 0
     };
