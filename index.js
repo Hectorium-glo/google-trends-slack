@@ -10,7 +10,13 @@ const MAX_ITEMS = Number(process.env.MAX_ITEMS || 10);
 
 // Active RSS (baseline)
 const RSS_URL = `https://trends.google.com/trending/rss?geo=${encodeURIComponent(GEO)}`;
-const parser = new Parser();
+
+// IMPORTANT: capture ht:news_item_url from RSS
+const parser = new Parser({
+  customFields: {
+    item: ["ht:news_item_url"]
+  }
+});
 
 // Enrichment (SerpApi) for Volume
 const SERPAPI_KEY = process.env.SERPAPI_KEY;
@@ -24,7 +30,16 @@ const SERPAPI_URL =
 /* ============================================ */
 
 /* ================== HELPERS ================== */
-const normalize = (s) => (s || "").toLowerCase().trim().replace(/\s+/g, " ");
+function stripDiacritics(s) {
+  return String(s || "")
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+const normalize = (s) => stripDiacritics(s);
 
 function pad(str, len) {
   const s = String(str ?? "");
@@ -48,13 +63,13 @@ function formatVolume(v) {
   return `${n}`;
 }
 
-// Turn formatted volume into a sortable number (rough estimate)
+// Turn formatted volume into sortable number (rough estimate)
 function volumeToNumber(vFormattedOrRaw) {
   if (vFormattedOrRaw == null) return 0;
 
   const s = String(vFormattedOrRaw).trim();
 
-  // If already formatted like "200K+"
+  // "200K+"
   const m = s.match(/^(\d+(?:\.\d+)?)([KMB])\+?$/i);
   if (m) {
     const val = Number(m[1]);
@@ -68,7 +83,7 @@ function volumeToNumber(vFormattedOrRaw) {
   const n = Number(s.replace(/,/g, ""));
   if (!Number.isFinite(n)) return 0;
 
-  // Same heuristic as formatVolume: 200 => 200K
+  // same heuristic: 200 => 200K
   if (n >= 1 && n < 1000) return n * 1000;
   return n;
 }
@@ -102,17 +117,13 @@ async function fetchTrendingRssTopN() {
   const feed = await parser.parseString(xml);
 
   return (feed.items || []).slice(0, MAX_ITEMS).map((it) => {
-    const newsUrls =
-      it["ht:news_item_url"] ||
-      it["news_item_url"] ||
-      it["ht:news_item_url[]"] ||
-      [];
-
-    const firstNewsUrl = Array.isArray(newsUrls) ? newsUrls[0] : (newsUrls || null);
+    const raw = it["ht:news_item_url"];
+    const newsUrls = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+    const firstNewsUrl = newsUrls[0] || null;
 
     return {
       title: String(it.title || "—"),
-      sampleUrl: firstNewsUrl || null
+      sampleUrl: firstNewsUrl
     };
   });
 }
@@ -173,8 +184,8 @@ function buildBlocks(rows) {
     timeZone: "Europe/Athens"
   }).format(new Date());
 
-  // narrower table
-  const W_POS = 2;
+  // table widths
+  const W_POS = 3;   // so 10 fits
   const W_TREND = 24;
   const W_VOL = 7;
 
@@ -206,11 +217,13 @@ function buildBlocks(rows) {
       text: { type: "mrkdwn", text: "```" + [header, sep, ...lines].join("\n") + "```" }
     },
     {
-      type: "context",
-      elements: rows.map((r, i) => ({
+      type: "section",
+      text: {
         type: "mrkdwn",
-        text: r.sampleUrl ? `*${i + 1}.* <${r.sampleUrl}|Sample URL>` : `*${i + 1}.* —`
-      }))
+        text: rows
+          .map((r, i) => (r.sampleUrl ? `*${i + 1}.* <${r.sampleUrl}|Sample URL>` : `*${i + 1}.* —`))
+          .join("\n")
+      }
     }
   ];
 }
@@ -232,10 +245,8 @@ async function main() {
     };
   });
 
-  // sort by search volume desc (to match UI sort=search-volume as close as possible)
+  // sort by search volume desc (approx)
   rows.sort((a, b) => (b.volumeNum || 0) - (a.volumeNum || 0));
-
-  // limit again after sort
   rows = rows.slice(0, MAX_ITEMS);
 
   await postToSlack(buildBlocks(rows), `Trending Now (GR) — Active`);
