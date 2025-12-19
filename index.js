@@ -92,9 +92,22 @@ async function fetchTrendingRssTopN() {
   if (!res.ok) throw new Error(`RSS HTTP ${res.status} | ${xml.slice(0, 140)}`);
 
   const feed = await parser.parseString(xml);
-  return (feed.items || []).slice(0, MAX_ITEMS).map((it) => ({
-    title: String(it.title || "—")
-  }));
+  return (feed.items || []).slice(0, MAX_ITEMS).map((it) => {
+  const newsUrls =
+    it["ht:news_item_url"] ||
+    it["news_item_url"] ||
+    it["ht:news_item_url[]"] ||
+    [];
+
+  const firstNewsUrl = Array.isArray(newsUrls)
+    ? newsUrls[0]
+    : newsUrls || null;
+
+  return {
+    title: String(it.title || "—"),
+    sampleUrl: firstNewsUrl
+  };
+});
 }
 
 /* ================== 2) SerpApi enrichment ================== */
@@ -170,52 +183,69 @@ function buildBlocks(rows) {
 
   // Column widths (ρυθμίζονται αν θες)
   const W_POS = 3;
-  const W_TREND = 30;
-  const W_VOL = 8;
+const W_TREND = 24;
+const W_VOL = 6;
 
-  const header =
+const header =
   pad("#", W_POS) + " | " +
   pad("Trend", W_TREND) + " | " +
   pad("Volume", W_VOL);
 
 const sep = "-".repeat(header.length);
 
-const lines = rows.map((r, i) => {
-  return (
+const lines = rows.map((r, i) => (
+  pad(i + 1, W_POS) + " | " +
+  pad(r.title, W_TREND) + " | " +
+  pad(r.volume || "—", W_VOL)
+));
+});
+
+  const header =
+    pad("#", W_POS) + " | " +
+    pad("Trend", W_TREND) + " | " +
+    pad("Volume", W_VOL);
+
+  const sep = "-".repeat(header.length);
+
+  const lines = rows.map((r, i) => (
     pad(i + 1, W_POS) + " | " +
     pad(r.title, W_TREND) + " | " +
     pad(r.volume || "—", W_VOL)
-  );
-});
+  ));
 
   return [
-  {
-    type: "header",
-    text: {
-      type: "plain_text",
-      text: "🇬🇷 Trending Now (GR) — Top 10",
-      emoji: true
-    }
-  },
-  {
-    type: "context",
-    elements: [
-      {
-        type: "mrkdwn",
-        text: `⏱️ ${now} • Αυτόματο update κάθε 30’`
+    {
+      type: "header",
+      text: {
+        type: "plain_text",
+        text: "🇬🇷 Trending Now (GR) — Active",
+        emoji: true
       }
-    ]
-  },
-  { type: "divider" },
-  {
-    type: "section",
-    text: {
-      type: "mrkdwn",
-      text: "```" + [header, sep, ...lines].join("\n") + "```"
+    },
+    {
+      type: "context",
+      elements: [
+        { type: "mrkdwn", text: `⏱️ ${now} • Active trends` }
+      ]
+    },
+    { type: "divider" },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: "```" + [header, sep, ...lines].join("\n") + "```"
+      }
+    },
+    {
+      type: "context",
+      elements: rows.map((r, i) => ({
+        type: "mrkdwn",
+        text: r.sampleUrl
+          ? `*${i + 1}.* <${r.sampleUrl}|Sample URL>`
+          : `*${i + 1}.* —`
+      }))
     }
-  },
-  }
-];
+  ];
 }
 
 /* ================== MAIN ================== */
