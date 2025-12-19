@@ -1,8 +1,7 @@
 import fetch from "node-fetch";
 import Parser from "rss-parser";
-import Redis from "ioredis";
 
-/* ================== CONFIG (same baseline RSS) ================== */
+/* ================== CONFIG (keep RSS baseline) ================== */
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
 if (!SLACK_WEBHOOK_URL) throw new Error("Missing SLACK_WEBHOOK_URL");
 
@@ -12,29 +11,7 @@ const MAX_ITEMS = Number(process.env.MAX_ITEMS || 10);
 const RSS_URL = `https://trends.google.com/trending/rss?geo=${encodeURIComponent(GEO)}`;
 const parser = new Parser();
 
-// Format raw search volume to K+/M+/B+
-function formatVolume(v) {
-  if (v == null) return "—";
-
-  // Αν έρθει ήδη formatted (π.χ. "200K+"), κράτα το
-  if (typeof v === "string" && /[KMB]\+?$/.test(v.trim())) {
-    return v.trim();
-  }
-
-  // Καθάρισε strings τύπου "12,345"
-  const n = Number(String(v).replace(/,/g, ""));
-  if (!Number.isFinite(n)) return String(v);
-
-  if (n >= 1_000_000_000) return `${Math.round(n / 1_000_000_000)}B+`;
-  if (n >= 1_000_000)     return `${Math.round(n / 1_000_000)}M+`;
-  if (n >= 1_000)         return `${Math.round(n / 1_000)}K+`;
-  return `${n}`;
-}
-
-/* ================== ENRICHMENT SOURCE ==================
-   We KEEP RSS as baseline, but enrich via SerpApi Trending Now.
-   SerpApi engine: google_trends_trending_now :contentReference[oaicite:1]{index=1}
-*/
+/* ================== ENRICHMENT (SerpApi) ================== */
 const SERPAPI_KEY = process.env.SERPAPI_KEY;
 if (!SERPAPI_KEY) throw new Error("Missing SERPAPI_KEY");
 
@@ -44,33 +21,12 @@ const SERPAPI_URL =
   `&hl=el` +
   `&api_key=${encodeURIComponent(SERPAPI_KEY)}`;
 
-/* ================== DIFF STATE (Redis) ================== */
-const REDIS_URL = process.env.REDIS_URL;
-if (!REDIS_URL) throw new Error("Missing REDIS_URL");
-
-const redis = new Redis(REDIS_URL, {
-  maxRetriesPerRequest: 1,
-  connectTimeout: 8000,
-  enableOfflineQueue: false,
-  lazyConnect: true
-});
-redis.on("error", (e) => console.log("[redis]", e?.message || e));
-
-const SEEN_KEY = `gt:prev_top10:${GEO}`;
-
+/* ================== HELPERS ================== */
 const normalize = (s) => (s || "").toLowerCase().trim().replace(/\s+/g, " ");
 
-/* ================== Slack ================== */
-async function postToSlack(blocks, text = "Google Trends") {
-  const res = await fetch(SLACK_WEBHOOK_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, blocks })
-  });
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`Slack webhook failed: ${res.status} ${t}`);
-  }
+function exploreLink(q) {
+  const url = `https://trends.google.com/trends/explore?geo=${GEO}&q=${encodeURIComponent(q)}`;
+  return `<${url}|περισσότερα εδώ>`;
 }
 
 function startedTimestampFromMinutes(mins) {
@@ -89,12 +45,36 @@ function startedTimestampFromMinutes(mins) {
   }).format(started);
 }
 
-function exploreLink(q) {
-  const url = `https://trends.google.com/trends/explore?geo=${GEO}&q=${encodeURIComponent(q)}`;
-  return `<${url}|περισσότερα εδώ>`;
+function formatVolume(v) {
+  if (v == null) return "—";
+
+  // Already formatted like "200K+"
+  if (typeof v === "string" && /[KMB]\+?$/.test(v.trim())) return v.trim();
+
+  // Handle "12,345"
+  const n = Number(String(v).replace(/,/g, ""));
+  if (!Number.isFinite(n)) return String(v);
+
+  if (n >= 1_000_000_000) return `${Math.round(n / 1_000_000_000)}B+`;
+  if (n >= 1_000_000)     return `${Math.round(n / 1_000_000)}M+`;
+  if (n >= 1_000)         return `${Math.round(n / 1_000)}K+`;
+  return `${n}`;
 }
 
-/* ================== 1) Baseline: RSS ================== */
+/* ================== Slack ================== */
+async function postToSlack(blocks, text = "Google Trends") {
+  const res = await fetch(SLACK_WEBHOOK_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, blocks })
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`Slack webhook failed: ${res.status} ${t}`);
+  }
+}
+
+/* ================== 1) RSS baseline ================== */
 async function fetchTrendingRssTopN() {
   const res = await fetch(RSS_URL, {
     headers: {
@@ -103,29 +83,29 @@ async function fetchTrendingRssTopN() {
     },
     redirect: "follow"
   });
+
   const xml = await res.text();
   if (!res.ok) throw new Error(`RSS HTTP ${res.status} | ${xml.slice(0, 140)}`);
 
   const feed = await parser.parseString(xml);
-  // RSS items usually have title + link, we only need title baseline
   return (feed.items || []).slice(0, MAX_ITEMS).map((it) => ({
     title: String(it.title || "—")
   }));
 }
 
-/* ================== 2) Enrichment: SerpApi ================== */
+/* ================== 2) SerpApi enrichment ================== */
 async function fetchSerpApiTrendingNow() {
   const res = await fetch(SERPAPI_URL, {
     headers: { "Accept": "application/json", "User-Agent": "Mozilla/5.0" }
   });
+
   const text = await res.text();
   if (!res.ok) throw new Error(`SerpApi HTTP ${res.status} | ${text.slice(0, 140)}`);
+
   return JSON.parse(text);
 }
 
 function indexEnrichmentByTitle(serpJson) {
-  // SerpApi returns structured data; fields vary slightly but commonly include:
-  // query/title, search volume/traffic, time active, related queries, explore links. :contentReference[oaicite:2]{index=2}
   const items =
     serpJson?.trending_searches ||
     serpJson?.trending_now ||
@@ -134,18 +114,18 @@ function indexEnrichmentByTitle(serpJson) {
     [];
 
   const map = new Map();
+
   for (const it of items) {
     const title = String(it?.query || it?.title || it?.trend || "");
     if (!title) continue;
 
     const volumeRaw =
-  it?.traffic ||
-  it?.search_volume ||
-  it?.formattedTraffic ||
-  it?.searches ||
-  null;
+      it?.traffic ||
+      it?.search_volume ||
+      it?.formattedTraffic ||
+      it?.searches ||
+      null;
 
-    // prefer “time_active_minutes” if present, else try derive from start/end
     const timeActiveMin = it?.time_active_minutes ?? null;
 
     const breakdown =
@@ -157,14 +137,18 @@ function indexEnrichmentByTitle(serpJson) {
     map.set(normalize(title), {
       volume: formatVolume(volumeRaw),
       startedText: startedTimestampFromMinutes(timeActiveMin),
-      breakdownLinks: (breakdown.length ? breakdown : [title]).slice(0, 3).map(exploreLink).join(", ")
+      breakdownLinks: (breakdown.length ? breakdown : [title])
+        .slice(0, 3)
+        .map(exploreLink)
+        .join(", ")
     });
   }
+
   return map;
 }
 
-/* ================== Newsroom Slack layout ================== */
-function buildNewsroomBlocks(rows, newCount) {
+/* ================== Slack newsroom "table" (fields grid) ================== */
+function buildBlocks(rows) {
   const now = new Intl.DateTimeFormat("el-GR", {
     day: "2-digit",
     month: "2-digit",
@@ -178,36 +162,30 @@ function buildNewsroomBlocks(rows, newCount) {
   const blocks = [
     {
       type: "header",
-      text: { type: "plain_text", text: `🇬🇷 Trending Now (GR) — ${newCount} NEW`, emoji: true }
+      text: { type: "plain_text", text: `🇬🇷 Trending Now (GR) — Top 10`, emoji: true }
     },
     {
       type: "context",
-      elements: [{ type: "mrkdwn", text: `⏱️ ${now} • Στέλνει μόνο όταν μπαίνει νέο στο Top10` }]
+      elements: [{ type: "mrkdwn", text: `⏱️ ${now} • Αυτόματο update κάθε 30’` }]
+    },
+    { type: "divider" },
+    {
+      type: "section",
+      fields: [
+        { type: "mrkdwn", text: "*Trend*" },
+        { type: "mrkdwn", text: "*Volume*" },
+        { type: "mrkdwn", text: "*Started*" },
+        { type: "mrkdwn", text: "*Breakdown*" }
+      ]
     },
     { type: "divider" }
   ];
 
-  // Προαιρετική “γραμμή κεφαλίδων”
-  blocks.push({
-    type: "section",
-    fields: [
-      { type: "mrkdwn", text: "*Trend*" },
-      { type: "mrkdwn", text: "*Volume*" },
-      { type: "mrkdwn", text: "*Started*" },
-      { type: "mrkdwn", text: "*Breakdown*" }
-    ]
-  });
-  blocks.push({ type: "divider" });
-
-  // 1 row = 1 section με 4 fields (grid)
   rows.forEach((r, idx) => {
-    const badge = r.isNew ? "🆕" : "";
-    const trendCell = `${badge} *${idx + 1}. ${r.title}*`.trim();
-
     blocks.push({
       type: "section",
       fields: [
-        { type: "mrkdwn", text: trendCell || "—" },
+        { type: "mrkdwn", text: `*${idx + 1}. ${r.title}*` },
         { type: "mrkdwn", text: r.volume || "—" },
         { type: "mrkdwn", text: r.startedText || "—" },
         { type: "mrkdwn", text: r.breakdownLinks || "—" }
@@ -220,17 +198,10 @@ function buildNewsroomBlocks(rows, newCount) {
 
 /* ================== MAIN ================== */
 async function main() {
-  // Connect Redis (state for diff)
-  await redis.connect();
-
-  // 1) Baseline list from RSS (kept as you requested)
   const rssTop = await fetchTrendingRssTopN();
-
-  // 2) Enrichment snapshot
   const serp = await fetchSerpApiTrendingNow();
   const enrichMap = indexEnrichmentByTitle(serp);
 
-  // 3) Compose Top10 rows
   const rows = rssTop.map((r) => {
     const e = enrichMap.get(normalize(r.title)) || {};
     return {
@@ -241,31 +212,7 @@ async function main() {
     };
   });
 
-  // 4) Diff vs previous Top10: NEW = not present previously
-  const prev = new Set(await redis.smembers(SEEN_KEY));
-  const currentKeys = rows.map((x) => normalize(x.title));
-  const newSet = currentKeys.filter((k) => !prev.has(k));
-
-  // If nothing new => do NOT send anything
-  if (newSet.length === 0) {
-    await redis.quit();
-    return;
-  }
-
-  // mark rows
-  const newKeysSet = new Set(newSet);
-  const marked = rows.map((x) => ({ ...x, isNew: newKeysSet.has(normalize(x.title)) }));
-
-  // 5) Save current Top10 as previous
-  const pipeline = redis.pipeline();
-  pipeline.del(SEEN_KEY);
-  currentKeys.forEach((k) => pipeline.sadd(SEEN_KEY, k));
-  await pipeline.exec();
-  await redis.quit();
-
-  // 6) Send newsroom layout
-  const blocks = buildNewsroomBlocks(marked, newSet.length);
-  await postToSlack(blocks, `Trending Now (GR) — ${newSet.length} NEW`);
+  await postToSlack(buildBlocks(rows), `Trending Now (GR) — Top 10`);
 }
 
 main().catch(async (err) => {
